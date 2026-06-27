@@ -206,7 +206,9 @@ function makeApiRequest(service, cookieId) {
 // Create server
 const server = http.createServer(async (req, res) => {
     // CORS headers
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    // CORS - allow the origin that made the request
+    const origin = req.headers.origin || '*';
+    res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept');
     res.setHeader('Access-Control-Allow-Credentials', 'true');
