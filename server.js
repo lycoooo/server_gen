@@ -13,7 +13,7 @@ const CONFIG = {
     loginAttemptWindow: 15 * 60 * 1000, // 15 minutes
     cleanupInterval: 60 * 60 * 1000, // 1 hour
     passwordVersion: 1, // INCREMENT THIS to invalidate all sessions on next restart
-    maxSessions: 1, // MAX sessions allowed (1 = single user only)
+    maxSessions: 1, 
     sessionWarningThreshold: 1 // Show warning when sessions >= this number
 };
 
@@ -92,14 +92,14 @@ function getSession(cookieHeader) {
 // Set cookie header
 function setSessionCookie(res, token) {
     res.setHeader('Set-Cookie', [
-        `session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${CONFIG.sessionExpiry / 1000}`
+        `session=${token}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=${CONFIG.sessionExpiry / 1000}`
     ]);
 }
 
 // Clear session cookie
 function clearSessionCookie(res) {
     res.setHeader('Set-Cookie', [
-        'session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0'
+        'session=; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=0'
     ]);
 }
 
