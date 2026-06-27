@@ -14,14 +14,20 @@ function loadUsers() {
             const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
             return new Map(Object.entries(data.users || {}));
         }
-    } catch (e) {}
+    } catch (e) {
+        console.error('Failed to load users:', e.message);
+    }
     return null;
 }
 
 // Save users to file
 function saveUsers() {
-    const data = { users: Object.fromEntries(users) };
-    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+    try {
+        const data = { users: Object.fromEntries(users) };
+        fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+    } catch (e) {
+        console.error('Failed to save users:', e.message);
+    }
 }
 
 // Configuration
