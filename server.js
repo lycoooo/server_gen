@@ -5,6 +5,24 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
+const DATA_FILE = path.join(__dirname, 'data.json');
+
+// Load users from file if exists
+function loadUsers() {
+    try {
+        if (fs.existsSync(DATA_FILE)) {
+            const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+            return new Map(Object.entries(data.users || {}));
+        }
+    } catch (e) {}
+    return null;
+}
+
+// Save users to file
+function saveUsers() {
+    const data = { users: Object.fromEntries(users) };
+    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+}
 
 // Configuration
 const CONFIG = {
@@ -17,10 +35,14 @@ const CONFIG = {
     sessionWarningThreshold: 1 // Show warning when sessions >= this number
 };
 
-// User storage - change password here, then increment passwordVersion above
-const users = new Map([
-    ['lyco', { password: 'lyco123', name: 'Lyco', role: 'user' }],
-]);
+// User storage - load from file or use defaults
+let users = loadUsers();
+if (!users) {
+    users = new Map([
+        ['lyco', { password: 'lyco', name: 'Lyco', role: 'user' }],
+    ]);
+    saveUsers();
+}
 
 // Session storage
 const sessions = new Map();
@@ -476,6 +498,7 @@ const server = http.createServer(async (req, res) => {
                 const userData = users.get(targetUsername);
                 userData.role = role;
                 users.set(targetUsername, userData);
+                saveUsers();
 
                 logSessionStatus('ROLE CHANGE', `by admin: ${targetUsername} -> ${role}`);
                 res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -512,6 +535,7 @@ const server = http.createServer(async (req, res) => {
                 const oldPass = userData.password;
                 userData.password = password;
                 users.set(targetUsername, userData);
+                saveUsers();
 
                 // Increment password version to invalidate all sessions
                 CONFIG.passwordVersion++;
@@ -557,6 +581,7 @@ const server = http.createServer(async (req, res) => {
                 const userData = users.get(oldUsername);
                 users.delete(oldUsername);
                 users.set(username, userData);
+                saveUsers();
 
                 logSessionStatus('USERNAME CHANGE', `by admin: ${oldUsername} -> ${username}`);
 
