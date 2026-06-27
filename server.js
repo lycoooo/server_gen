@@ -9,17 +9,23 @@ const PORT = process.env.PORT || 3000;
 // Configuration
 const CONFIG = {
     sessionExpiry: 24 * 60 * 60 * 1000, // 24 hours
-    maxLoginAttempts: 5,
-    loginAttemptWindow: 15 * 60 * 1000, // 15 minutes
+    maxLoginAttempts: 10,
+    loginAttemptWindow: 2 * 60 * 1000, // 5 minutes
     cleanupInterval: 60 * 60 * 1000, // 1 hour
     passwordVersion: 1, // INCREMENT THIS to invalidate all sessions on next restart
-    maxSessions: 1, 
-    sessionWarningThreshold: 1 // Show warning when sessions >= this number
+    maxSessions: 10,
+    sessionWarningThreshold: 15, // Show warning when sessions >= this number
+    enableIPBinding: false, // Set to true for production security
+    production: process.env.NODE_ENV === 'production' // Auto-detect production
 };
 
 // User storage
+// Default user - configure via environment variables
+const DEFAULT_USER = process.env.DEFAULT_USER || 'lyco';
+const DEFAULT_PASS = process.env.DEFAULT_PASS || 'lyco123';
+
 const users = new Map([
-    ['lyco', { password: 'lyco123', name: 'Lyco', role: 'user' }],
+    [DEFAULT_USER, { password: DEFAULT_PASS, name: '', role: 'user' }],
 ]);
 
 // Session storage
@@ -57,6 +63,16 @@ setInterval(() => {
     }
 }, CONFIG.cleanupInterval);
 
+// Normalize IP address (handle IPv6 localhost ::1 vs IPv4 127.0.0.1)
+function normalizeIP(ip) {
+    if (!ip) return 'unknown';
+    // ::1 is IPv6 localhost, treat as same as 127.0.0.1
+    if (ip === '::1' || ip === '127.0.0.1' || ip === '::ffff:127.0.0.1') {
+        return '127.0.0.1';
+    }
+    return ip;
+}
+
 // Get session from cookie header with IP and User-Agent validation
 function getSession(cookieHeader, clientIP, userAgent) {
     if (!cookieHeader) return null;
@@ -86,8 +102,8 @@ function getSession(cookieHeader, clientIP, userAgent) {
         return null;
     }
 
-    // IP binding - invalidate if IP changed
-    if (session.ip !== clientIP) {
+    // IP binding - only check if enabled in config
+    if (CONFIG.enableIPBinding && normalizeIP(session.ip) !== normalizeIP(clientIP)) {
         sessions.delete(sessionToken);
         return null;
     }
@@ -103,16 +119,36 @@ function getSession(cookieHeader, clientIP, userAgent) {
 
 // Set cookie header
 function setSessionCookie(res, token) {
-    res.setHeader('Set-Cookie', [
-        `session=${token}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=${CONFIG.sessionExpiry / 1000}`
-    ]);
+    const cookieOptions = [
+        `Path=/`,
+        `HttpOnly`,
+        `Max-Age=${CONFIG.sessionExpiry / 1000}`
+    ];
+
+    if (CONFIG.production) {
+        cookieOptions.push('SameSite=None', 'Secure');
+    } else {
+        cookieOptions.push('SameSite=Lax');
+    }
+
+    res.setHeader('Set-Cookie', [`session=${token}; ${cookieOptions.join('; ')}`]);
 }
 
 // Clear session cookie
 function clearSessionCookie(res) {
-    res.setHeader('Set-Cookie', [
-        'session=; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=0'
-    ]);
+    const cookieOptions = [
+        'Path=/',
+        'HttpOnly',
+        'Max-Age=0'
+    ];
+
+    if (CONFIG.production) {
+        cookieOptions.push('SameSite=None', 'Secure');
+    } else {
+        cookieOptions.push('SameSite=Lax');
+    }
+
+    res.setHeader('Set-Cookie', [`session=; ${cookieOptions.join('; ')}`]);
 }
 
 // API proxy handler
@@ -284,7 +320,7 @@ const server = http.createServer(async (req, res) => {
         switch (url) {
             case '/api/login': {
                 const body = await getBody();
-                const { username, password } = JSON.parse(body);
+                const { username, password, name } = JSON.parse(body);
 
                 // Validate input
                 if (!username || !password) {
@@ -321,7 +357,7 @@ const server = http.createServer(async (req, res) => {
                 // Clear failed attempts on success
                 loginAttempts.delete(username);
 
-                // 🚨 SESSION LIMIT CHECK - REJECT if full
+                // 🚨 SESSION LIMIT CHECK - REJECT if full (check FIRST, before needing name)
                 const currentSessions = getActiveSessionsCount();
                 if (currentSessions >= CONFIG.maxSessions) {
                     logSessionStatus('REJECTED', `${username} - limit: ${CONFIG.maxSessions}`);
@@ -330,14 +366,23 @@ const server = http.createServer(async (req, res) => {
                     return;
                 }
 
+                // If no name provided, require user to enter name first (no session created)
+                if (!name) {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true, needsName: true, name: username, role: user.role }));
+                    return;
+                }
+
                 // Create session with password version and security bindings
                 const sessionToken = generateToken();
+                const displayName = name;
+
                 sessions.set(sessionToken, {
                     username: username,
-                    name: user.name,
+                    name: displayName,
                     role: user.role,
                     createdAt: Date.now(),
-                    ip: clientIP,
+                    ip: normalizeIP(clientIP),
                     userAgent: req.headers['user-agent'],
                     passwordVersion: CONFIG.passwordVersion
                 });
@@ -348,7 +393,7 @@ const server = http.createServer(async (req, res) => {
                 setSessionCookie(res, sessionToken);
 
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ success: true, name: user.name, role: user.role }));
+                res.end(JSON.stringify({ success: true, name: displayName, role: user.role }));
                 break;
             }
 
@@ -439,8 +484,12 @@ const server = http.createServer(async (req, res) => {
 
                 if (sessions.has(token)) {
                     const s = sessions.get(token);
+                    const targetUsername = s.username;
+
+                    // Kill only this specific session (by token)
                     sessions.delete(token);
-                    logSessionStatus('KILLED', `by admin: ${session.username}, target: ${s.username}`);
+
+                    logSessionStatus('KILLED', `by admin: ${session.username}, target: ${targetUsername}`);
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ success: true }));
                 } else {
