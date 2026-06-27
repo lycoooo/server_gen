@@ -57,8 +57,8 @@ setInterval(() => {
     }
 }, CONFIG.cleanupInterval);
 
-// Get session from cookie header
-function getSession(cookieHeader) {
+// Get session from cookie header with IP and User-Agent validation
+function getSession(cookieHeader, clientIP, userAgent) {
     if (!cookieHeader) return null;
 
     const cookies = Object.fromEntries(
@@ -82,6 +82,18 @@ function getSession(cookieHeader) {
 
     // Check if session expired
     if (Date.now() - session.createdAt > CONFIG.sessionExpiry) {
+        sessions.delete(sessionToken);
+        return null;
+    }
+
+    // IP binding - invalidate if IP changed
+    if (session.ip !== clientIP) {
+        sessions.delete(sessionToken);
+        return null;
+    }
+
+    // User-Agent binding - invalidate if user agent changed significantly
+    if (session.userAgent && userAgent && !session.userAgent.includes(userAgent.substring(0, 50))) {
         sessions.delete(sessionToken);
         return null;
     }
@@ -171,6 +183,11 @@ const server = http.createServer(async (req, res) => {
 
     const url = req.url.split('?')[0];
 
+    // Get real client IP (handle proxies)
+    const clientIP = req.headers['x-forwarded-for']?.split(',')[0]?.trim()
+        || req.socket?.remoteAddress
+        || 'unknown';
+
     // Serve static files
     if (url === '/' || url === '/index.html' || url === '/browser.html') {
         const filePath = path.join(__dirname, 'browser.html');
@@ -244,7 +261,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Auth check for protected routes
-    const session = getSession(req.headers.cookie);
+    const session = getSession(req.headers.cookie, clientIP, req.headers['user-agent']);
 
     if (route.auth && !session) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -313,14 +330,15 @@ const server = http.createServer(async (req, res) => {
                     return;
                 }
 
-                // Create session with password version
+                // Create session with password version and security bindings
                 const sessionToken = generateToken();
                 sessions.set(sessionToken, {
                     username: username,
                     name: user.name,
                     role: user.role,
                     createdAt: Date.now(),
-                    ip: req.socket.remoteAddress,
+                    ip: clientIP,
+                    userAgent: req.headers['user-agent'],
                     passwordVersion: CONFIG.passwordVersion
                 });
 
