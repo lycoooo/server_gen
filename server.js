@@ -2,8 +2,106 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
+
+// Configuration
+const CONFIG = {
+    sessionExpiry: 24 * 60 * 60 * 1000, // 24 hours
+    maxLoginAttempts: 5,
+    loginAttemptWindow: 15 * 60 * 1000, // 15 minutes
+    cleanupInterval: 60 * 60 * 1000, // 1 hour
+    passwordVersion: 1, // INCREMENT THIS to invalidate all sessions on next restart
+    maxSessions: 1, // MAX sessions allowed (1 = single user only)
+    sessionWarningThreshold: 1 // Show warning when sessions >= this number
+};
+
+// User storage - change password here, then increment passwordVersion above
+const users = new Map([
+    ['lyco', { password: 'lyco123', name: 'Lyco', role: 'user' }],
+]);
+
+// Session storage
+const sessions = new Map();
+const loginAttempts = new Map();
+
+// Generate secure session token
+function generateToken() {
+    return crypto.randomBytes(32).toString('hex');
+}
+
+// Get all active sessions count
+function getActiveSessionsCount() {
+    return sessions.size;
+}
+
+// Log session status (silent for production)
+function logSessionStatus(action, sessionInfo = '') {
+    const count = getActiveSessionsCount();
+    // Session logging disabled for production deployment
+}
+
+// Clean old sessions periodically
+setInterval(() => {
+    const now = Date.now();
+    let cleaned = 0;
+    for (const [token, session] of sessions) {
+        if (now - session.createdAt > CONFIG.sessionExpiry) {
+            sessions.delete(token);
+            cleaned++;
+        }
+    }
+    if (cleaned > 0) {
+        logSessionStatus('EXPIRED', `cleaned: ${cleaned}`);
+    }
+}, CONFIG.cleanupInterval);
+
+// Get session from cookie header
+function getSession(cookieHeader) {
+    if (!cookieHeader) return null;
+
+    const cookies = Object.fromEntries(
+        cookieHeader.split(';').map(c => {
+            const [k, v] = c.trim().split('=');
+            return [k, v];
+        })
+    );
+
+    const sessionToken = cookies['session'];
+    if (!sessionToken) return null;
+
+    const session = sessions.get(sessionToken);
+    if (!session) return null;
+
+    // Check password version - invalidate if password changed
+    if (session.passwordVersion !== CONFIG.passwordVersion) {
+        sessions.delete(sessionToken);
+        return null;
+    }
+
+    // Check if session expired
+    if (Date.now() - session.createdAt > CONFIG.sessionExpiry) {
+        sessions.delete(sessionToken);
+        return null;
+    }
+
+    return session;
+}
+
+// Set cookie header
+function setSessionCookie(res, token) {
+    res.setHeader('Set-Cookie', [
+        `session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${CONFIG.sessionExpiry / 1000}`
+    ]);
+}
+
+// Clear session cookie
+function clearSessionCookie(res) {
+    res.setHeader('Set-Cookie', [
+        'session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0'
+    ]);
+}
 
 // API proxy handler
 function makeApiRequest(service, cookieId) {
@@ -16,25 +114,11 @@ function makeApiRequest(service, cookieId) {
             path: '/api/nftoken',
             method: 'POST',
             headers: {
-                'authority': 'acct-gen.vercel.app',
-                'method': 'POST',
-                'path': '/api/nftoken',
-                'scheme': 'https',
-                'accept': '*/*',
-                'accept-encoding': 'gzip, deflate, br, zstd',
-                'accept-language': 'en-US,en;q=0.9',
-                'content-type': 'application/json',
-                'cookie': 'sb-lcokreopfsbobvxqfteb-auth-token=base64-eyJhY2Nlc3NfdG9rZW4iOiJleUpoYkdjaU9pSkZVekkxTmlJc0ltdHBaQ0k2SW1Wa05HUTNNVEkyTFRKbVpHTXROR1UzTnkwNE9UZzRMVGt5WVdRNVpqQTBOVGs1WXlJc0luUjVjQ0k2SWtwWFZDSjkuZXlKcGMzTWlPaUpvZEhSd2N6b3ZMMnhqYjJ0eVpXOXdabk5pYjJKMmVIRm1kR1ZpTG5OMWNHRmlZWE5sTG1OdkwyRjFkR2d2ZGpFaUxDSnpkV0lpT2lJeE0yVmpZV1JqWXkxaU4yRmtMVFJtTnpRdE9EQmxZUzFsWXpGaFpXTmlZVFpsTURRaUxDSmhkV1FpT2lKaGRYUm9aVzUwYVdOaGRHVmtJaXdpWlhod0lqb3hOemd5TkRrd016STRMQ0pwWVhRaU9qRTNPREkwT0RZM01qZ3NJbVZ0WVdsc0lqb2ljR2hBWm5KbFpTNWpiMjBpTENKd2FHOXVaU0k2SWlJc0ltRndjRjl0WlhSaFpHRjBZU0k2ZXlKd2NtOTJhV1JsY2lJNkltVnRZV2xzSWl3aWNISnZkbWxrWlhKeklqcGJJbVZ0WVdsc0lsMTlMQ0oxYzJWeVgyMWxkR0ZrWVhSaElqcDdJbVZ0WVdsc1gzWmxjbWxtYVdWa0lqcDBjblZsTENKeWIyeGxJam9pZFhObGNpSjlMQ0p5YjJ4bElqb2lZWFYwYUdWdWRHbGpZWFJsWkNJc0ltRmhiQ0k2SW1GaGJERWlMQ0poYlhJaU9sdDdJbTFsZEdodlpDSTZJbkJoYzNOM2IzSmtJaXdpZEdsdFpYTjBZVzF3SWpveE56Z3lORGd6TWpFMmZWMHNJbk5sYzNOcGIyNWZhV1FpT2lKaU0yWTVNR0psWmkxaE1UZzJMVFEyTXpjdFlqVTFNaTFpTlRrMU1XUXpNek13TXpFaUxDSnBjMTloYm05dWVXMXZkWE1pT21aaGJITmxmUS51cEdlXzlGMFhoQmNxdVFTV2tBektJRU9iaUdDZFdyMzNPMDlOVHg3TllXRmdhX0FFMW0zNUM5OEFJb1F3RHBidl9RUWZLVHV0QXpxUHpPQTE5WFdNUSIsInRva2VuX3R5cGUiOiJiZWFyZXIiLCJleHBpcmVzX2luIjozNjAwLCJleHBpcmVzX2F0IjoxNzgyNDkwMzI4LCJyZWZyZXNoX3Rva2VuIjoiNXBidndxdnA0aWdkIiwidXNlciI6eyJpZCI6IjEzZWNhZGNjLWI3YWQtNGY3NC04MGVhLWVjMWFlY2JhNmUwNCIsImF1ZCI6ImF1dGhlbnRpY2F0ZWQiLCJyb2xlIjoiYXV0aGVudGljYXRlZCIsImVtYWlsIjoicGhAZnJlZS5jb20iLCJlbWFpbF9jb25maXJtZWRfYXQiOiIyMDI2LTA2LTI0VDE0OjQ3OjExLjM0MDAxNFoiLCJwaG9uZSI6IiIsImNvbmZpcm1lZF9hdCI6IjIwMjYtMDYtMjRUMTQ6NDc6MTEuMzQwMDE0WiIsImxhc3Rfc2lnbl9pbl9hdCI6IjIwMjYtMDYtMjZUMTU6MTA6MDAuNDU2MjIxWiIsImFwcF9tZXRhZGF0YSI6eyJwcm92aWRlciI6ImVtYWlsIiwicHJvdmlkZXJzIjpbImVtYWlsIl19LCJ1c2VyX21ldGFkYXRhIjp7ImVtYWlsX3ZlcmlmaWVkIjp0cnVlLCJyb2xlIjoidXNlciJ9LCJpZGVudGl0aWVzIjpbeyJpZGVudGl0eV9pZCI6ImI5ZmE1NDRjLTNlMjEtNGZkNS1iMjhlLTk5NTBlNTBkM2RjOCIsImlkIjoiMTNlY2FkY2MtYjdhZC00Zjc0LTgwZWEtZWMxYWVjYmE2ZTA0IiwidXNlcl9pZCI6IjEzZWNhZGNjLWI3YWQtNGY3NC04MGVhLWVjMWFlY2JhNmUwNCIsImlkZW50aXR5X2RhdGEiOnsiZW1haWwiOiJwaEBmcmUuY29tIiwiZW1haWxfdmVyaWZpZWQiOmZhbHNlLCJwaG9uZV92ZXJpZmllZCI6ZmFsc2UsInN1YiI6IjEzZWNhZGNjLWI3YWQtNGY3NC04MGVhLWVjMWFlY2JhNmUwNCJ9LCJwcm92aWRlciI6ImVtYWlsIiwibGFzdF9zaWduX2luX2F0IjoiMjAyNi0wNi0yNFQxNDo0NzoxMS4zMzYxMzRaIiwiY3JlYXRlZF9hdCI6IjIwMjYtMDYtMjRUMTQ6NDc6MTEuMzM2MTk3WiIsInVwZGF0ZWRfYXQiOiIyMDI2LTA2LTI0VDE0OjQ3OjExLjMzNjE5N1oiLCJlbWFpbCI6InBoQGZyZWUuY29tIn1dLCJjcmVhdGVkX2F0IjoiMjAyNi0wNi0yNFQxNDo0NzoxMS4zMjgyNzdaIiwidXBkYXRlZF9hdCI6IjIwMjYtMDYtMjZUMTU6MTA6MDEuMDEzODA2WiIsImlzX2Fub255bW91cyI6ZmFsc2V9fQ',
-                'origin': 'https://acct-gen.vercel.app',
-                'priority': 'u=1, i',
-                'referer': 'https://acct-gen.vercel.app/dashboard/user/generate',
-                'sec-ch-ua': '"Microsoft Edge";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
-                'sec-ch-ua-mobile': '?0',
-                'sec-ch-ua-platform': '"Windows"',
-                'sec-fetch-dest': 'empty',
-                'sec-fetch-mode': 'cors',
-                'sec-fetch-site': 'same-origin',
-                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36 Edg/149.0.0.0'
+                'Content-Type': 'application/json',
+                'Accept': '*/*',
+                'Origin': 'https://acct-gen.vercel.app',
+                'Referer': 'https://acct-gen.vercel.app/dashboard/user/generate',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
         };
 
@@ -75,61 +159,419 @@ function makeApiRequest(service, cookieId) {
 const server = http.createServer(async (req, res) => {
     // CORS headers
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
-    res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept');
     res.setHeader('Access-Control-Allow-Credentials', 'true');
 
     if (req.method === 'OPTIONS') {
-        res.writeHead(200);
+        res.writeHead(204);
         res.end();
         return;
     }
 
-    // Serve browser.html
-    if (req.url === '/' || req.url === '/index.html' || req.url === '/browser.html') {
+    const url = req.url.split('?')[0];
+
+    // Serve static files
+    if (url === '/' || url === '/index.html' || url === '/browser.html') {
         const filePath = path.join(__dirname, 'browser.html');
         fs.readFile(filePath, (err, data) => {
             if (err) {
                 res.writeHead(500);
-                res.end('Error loading browser.html');
+                res.end('Error loading file');
                 return;
             }
-            res.writeHead(200, { 'Content-Type': 'text/html' });
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
             res.end(data);
         });
         return;
     }
 
-    // API proxy endpoint
-    if (req.url === '/api/proxy' && req.method === 'POST') {
-        let body = '';
-        req.on('data', chunk => body += chunk);
-        req.on('end', async () => {
-            try {
-                const { service, cookieId } = JSON.parse(body);
-                const result = await makeApiRequest(service, cookieId);
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify(result));
-            } catch (error) {
-                res.writeHead(500, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ success: false, error: error.message }));
+    // Serve admin.html
+    if (url === '/admin.html' || url === '/admin') {
+        const filePath = path.join(__dirname, 'admin.html');
+        fs.readFile(filePath, (err, data) => {
+            if (err) {
+                res.writeHead(500);
+                res.end('Error loading file');
+                return;
             }
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end(data);
         });
         return;
     }
 
-    res.writeHead(404);
-    res.end('Not Found');
+    // API Routes
+    const apiRoutes = {
+        '/api/login': { method: 'POST', auth: false },
+        '/api/logout': { method: 'POST', auth: true },
+        '/api/auth': { method: 'GET', auth: false },
+        '/api/admin-auth': { method: 'GET', auth: false },
+        '/api/proxy': { method: 'POST', auth: true },
+        '/api/sessions': { method: 'GET', auth: false },
+        '/api/sessions/kill': { method: 'POST', auth: false },
+        '/api/users': { method: 'GET', auth: false },
+        '/api/users/username/role': { method: 'PUT', auth: false },
+        '/api/users/username/password': { method: 'PUT', auth: false },
+        '/api/users/username/username': { method: 'PUT', auth: false }
+    };
+
+    // Handle dynamic routes
+    let route = apiRoutes[url];
+
+    if (!route) {
+        if (url.match(/^\/api\/users\/[^/]+\/role$/)) {
+            route = apiRoutes['/api/users/username/role'];
+        } else if (url.match(/^\/api\/users\/[^/]+\/password$/)) {
+            route = apiRoutes['/api/users/username/password'];
+        } else if (url.match(/^\/api\/users\/[^/]+\/username$/)) {
+            route = apiRoutes['/api/users/username/username'];
+        }
+    }
+
+    // 404 for unknown routes
+    if (!route) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Not found' }));
+        return;
+    }
+
+    // Method check
+    if (req.method !== route.method) {
+        res.writeHead(405, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Method not allowed' }));
+        return;
+    }
+
+    // Auth check for protected routes
+    const session = getSession(req.headers.cookie);
+
+    if (route.auth && !session) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Unauthorized', code: 'NO_SESSION' }));
+        return;
+    }
+
+    // Get request body
+    const getBody = () => {
+        return new Promise((resolve, reject) => {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => resolve(body));
+            req.on('error', reject);
+        });
+    };
+
+    // Handle routes
+    try {
+        switch (url) {
+            case '/api/login': {
+                const body = await getBody();
+                const { username, password } = JSON.parse(body);
+
+                // Validate input
+                if (!username || !password) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Username and password required' }));
+                    return;
+                }
+
+                // Rate limiting check
+                const attempts = loginAttempts.get(username) || { count: 0, firstAttempt: Date.now() };
+                if (attempts.count >= CONFIG.maxLoginAttempts) {
+                    if (Date.now() - attempts.firstAttempt < CONFIG.loginAttemptWindow) {
+                        res.writeHead(429, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, error: 'Too many login attempts. Try again later.' }));
+                        return;
+                    }
+                    // Reset attempts after window
+                    attempts.count = 0;
+                    attempts.firstAttempt = Date.now();
+                }
+
+                // Check credentials
+                const user = users.get(username);
+                if (!user || user.password !== password) {
+                    // Increment failed attempts
+                    attempts.count++;
+                    loginAttempts.set(username, attempts);
+
+                    res.writeHead(401, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Invalid credentials' }));
+                    return;
+                }
+
+                // Clear failed attempts on success
+                loginAttempts.delete(username);
+
+                // 🚨 SESSION LIMIT CHECK - REJECT if full
+                const currentSessions = getActiveSessionsCount();
+                if (currentSessions >= CONFIG.maxSessions) {
+                    logSessionStatus('REJECTED', `${username} - limit: ${CONFIG.maxSessions}`);
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Server at maximum capacity. Please try again later.' }));
+                    return;
+                }
+
+                // Create session with password version
+                const sessionToken = generateToken();
+                sessions.set(sessionToken, {
+                    username: username,
+                    name: user.name,
+                    role: user.role,
+                    createdAt: Date.now(),
+                    ip: req.socket.remoteAddress,
+                    passwordVersion: CONFIG.passwordVersion
+                });
+
+                // Log login
+                logSessionStatus('LOGIN', username);
+
+                setSessionCookie(res, sessionToken);
+
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true, name: user.name, role: user.role }));
+                break;
+            }
+
+            case '/api/logout': {
+                const cookie = req.headers.cookie;
+                if (cookie) {
+                    const cookies = Object.fromEntries(
+                        cookie.split(';').map(c => {
+                            const [k, v] = c.trim().split('=');
+                            return [k, v];
+                        })
+                    );
+                    if (cookies['session']) {
+                        const session = sessions.get(cookies['session']);
+                        sessions.delete(cookies['session']);
+                        logSessionStatus('LOGOUT', session?.username || 'unknown');
+                    }
+                }
+
+                clearSessionCookie(res);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true }));
+                break;
+            }
+
+            case '/api/auth': {
+                if (session) {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        authenticated: true,
+                        name: session.name,
+                        role: session.role
+                    }));
+                } else {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ authenticated: false }));
+                }
+                break;
+            }
+
+            case '/api/proxy': {
+                const body = await getBody();
+                const { service, cookieId } = JSON.parse(body);
+
+                if (!service) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Service required' }));
+                    return;
+                }
+
+                const result = await makeApiRequest(service, cookieId || 'random');
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(result));
+                break;
+            }
+
+            // ADMIN: Get all sessions
+            case '/api/sessions': {
+                const allSessions = [];
+                for (const [token, s] of sessions) {
+                    allSessions.push({
+                        token: token,
+                        username: s.username,
+                        name: s.name,
+                        role: s.role,
+                        ip: s.ip,
+                        createdAt: s.createdAt
+                    });
+                }
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    sessions: allSessions,
+                    passwordVersion: CONFIG.passwordVersion
+                }));
+                break;
+            }
+
+            // ADMIN: Kill a session
+            case '/api/sessions/kill': {
+                const body = await getBody();
+                const { token } = JSON.parse(body);
+
+                if (!token) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Token required' }));
+                    return;
+                }
+
+                if (sessions.has(token)) {
+                    const s = sessions.get(token);
+                    sessions.delete(token);
+                    logSessionStatus('KILLED', `by admin: ${session.username}, target: ${s.username}`);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true }));
+                } else {
+                    res.writeHead(404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Session not found' }));
+                }
+                break;
+            }
+
+            // ADMIN: Get all users
+            case '/api/users': {
+                const allUsers = [];
+                for (const [username, u] of users) {
+                    allUsers.push({
+                        username: username,
+                        name: u.name,
+                        role: u.role
+                    });
+                }
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ users: allUsers }));
+                break;
+            }
+
+            // ADMIN: Change user role (URL: /api/users/username/role)
+            case '/api/users/username/role': {
+                // Parse username from URL: /api/users/lyco/role -> lyco
+                const match = url.match(/^\/api\/users\/([^/]+)\/role$/);
+                if (!match) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Invalid URL format' }));
+                    return;
+                }
+                const targetUsername = match[1];
+
+                const body = await getBody();
+                const { role } = JSON.parse(body);
+
+                if (!role || !['admin', 'user'].includes(role)) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Role must be admin or user' }));
+                    return;
+                }
+
+                if (!users.has(targetUsername)) {
+                    res.writeHead(404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'User not found' }));
+                    return;
+                }
+
+                const userData = users.get(targetUsername);
+                userData.role = role;
+                users.set(targetUsername, userData);
+
+                logSessionStatus('ROLE CHANGE', `by admin: ${targetUsername} -> ${role}`);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true, username: targetUsername, role: role }));
+                break;
+            }
+
+            // ADMIN: Change user password
+            case '/api/users/username/password': {
+                const match = url.match(/^\/api\/users\/([^/]+)\/password$/);
+                if (!match) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Invalid URL format' }));
+                    return;
+                }
+                const targetUsername = match[1];
+
+                const body = await getBody();
+                const { password } = JSON.parse(body);
+
+                if (!password || password.length < 3) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Password must be at least 3 characters' }));
+                    return;
+                }
+
+                if (!users.has(targetUsername)) {
+                    res.writeHead(404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'User not found' }));
+                    return;
+                }
+
+                const userData = users.get(targetUsername);
+                const oldPass = userData.password;
+                userData.password = password;
+                users.set(targetUsername, userData);
+
+                // Increment password version to invalidate all sessions
+                CONFIG.passwordVersion++;
+
+                logSessionStatus('PASSWORD CHANGE', `by admin: ${targetUsername}`);
+
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true, username: targetUsername, newVersion: CONFIG.passwordVersion }));
+                break;
+            }
+
+            // ADMIN: Change username
+            case '/api/users/username/username': {
+                const match = url.match(/^\/api\/users\/([^/]+)\/username$/);
+                if (!match) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Invalid URL format' }));
+                    return;
+                }
+                const oldUsername = match[1];
+
+                const body = await getBody();
+                const { username } = JSON.parse(body);
+
+                if (!username || username.length < 2) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Username must be at least 2 characters' }));
+                    return;
+                }
+
+                if (users.has(username)) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Username already exists' }));
+                    return;
+                }
+
+                if (!users.has(oldUsername)) {
+                    res.writeHead(404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'User not found' }));
+                    return;
+                }
+
+                const userData = users.get(oldUsername);
+                users.delete(oldUsername);
+                users.set(username, userData);
+
+                logSessionStatus('USERNAME CHANGE', `by admin: ${oldUsername} -> ${username}`);
+
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true, oldUsername: oldUsername, newUsername: username }));
+                break;
+            }
+        }
+    } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Internal server error' }));
+    }
 });
 
 server.listen(PORT, () => {
-    console.log('='.repeat(50));
-    console.log('  🎉 Server running!');
-    console.log('='.repeat(50));
-    console.log('  Open your browser and go to:');
-    console.log('  ➤ http://localhost:' + PORT);
-    console.log('='.repeat(50));
-    console.log('');
-    console.log('  Press Ctrl+C to stop the server');
-    console.log('');
+    // Server started silently
+    logSessionStatus('STARTUP', 'server started');
 });
