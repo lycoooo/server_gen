@@ -24,8 +24,13 @@ const CONFIG = {
 const DEFAULT_USER = process.env.DEFAULT_USER || 'lyco';
 const DEFAULT_PASS = process.env.DEFAULT_PASS || 'lyco123';
 
+// Default admin - change password for security
+const ADMIN_USER = process.env.ADMIN_USER || 'admin';
+const ADMIN_PASS = process.env.ADMIN_PASS || 'admin123';
+
 const users = new Map([
     [DEFAULT_USER, { password: DEFAULT_PASS, name: '', role: 'user' }],
+    [ADMIN_USER, { password: ADMIN_PASS, name: 'Administrator', role: 'admin' }],
 ]);
 
 // Session storage
@@ -263,12 +268,14 @@ const server = http.createServer(async (req, res) => {
         '/api/auth': { method: 'GET', auth: false },
         '/api/admin-auth': { method: 'GET', auth: false },
         '/api/proxy': { method: 'POST', auth: true },
-        '/api/sessions': { method: 'GET', auth: false },
-        '/api/sessions/kill': { method: 'POST', auth: false },
-        '/api/users': { method: 'GET', auth: false },
-        '/api/users/username/role': { method: 'PUT', auth: false },
-        '/api/users/username/password': { method: 'PUT', auth: false },
-        '/api/users/username/username': { method: 'PUT', auth: false }
+        '/api/sessions': { method: 'GET', auth: true, adminOnly: true },
+        '/api/sessions/kill': { method: 'POST', auth: true, adminOnly: true },
+        '/api/users': { method: 'GET', auth: true, adminOnly: true },
+        '/api/users/create': { method: 'POST', auth: true, adminOnly: true },
+        '/api/users/delete': { method: 'POST', auth: true, adminOnly: true },
+        '/api/users/username/role': { method: 'PUT', auth: true, adminOnly: true },
+        '/api/users/username/password': { method: 'PUT', auth: true, adminOnly: true },
+        '/api/users/username/username': { method: 'PUT', auth: true, adminOnly: true }
     };
 
     // Handle dynamic routes
@@ -281,6 +288,10 @@ const server = http.createServer(async (req, res) => {
             route = apiRoutes['/api/users/username/password'];
         } else if (url.match(/^\/api\/users\/[^/]+\/username$/)) {
             route = apiRoutes['/api/users/username/username'];
+        } else if (url.match(/^\/api\/users\/delete$/)) {
+            route = apiRoutes['/api/users/delete'];
+        } else if (url.match(/^\/api\/users\/create$/)) {
+            route = apiRoutes['/api/users/create'];
         }
     }
 
@@ -304,6 +315,13 @@ const server = http.createServer(async (req, res) => {
     if (route.auth && !session) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Unauthorized', code: 'NO_SESSION' }));
+        return;
+    }
+
+    // Admin-only check
+    if (route.adminOnly && session && session.role !== 'admin') {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Admin access required', code: 'ADMIN_ONLY' }));
         return;
     }
 
@@ -395,7 +413,12 @@ const server = http.createServer(async (req, res) => {
                 setSessionCookie(res, sessionToken);
 
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ success: true, name: displayName, role: user.role }));
+                res.end(JSON.stringify({
+                    success: true,
+                    name: displayName,
+                    role: user.role,
+                    token: sessionToken  // Return token in response for API authorization
+                }));
                 break;
             }
 
@@ -513,6 +536,74 @@ const server = http.createServer(async (req, res) => {
                 }
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ users: allUsers }));
+                break;
+            }
+
+            // ADMIN: Create new user
+            case '/api/users/create': {
+                const body = await getBody();
+                const { username, password, role, name } = JSON.parse(body);
+
+                if (!username || !password) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Username and password required' }));
+                    return;
+                }
+
+                if (users.has(username)) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Username already exists' }));
+                    return;
+                }
+
+                users.set(username, {
+                    password: password,
+                    name: name || '',
+                    role: role || 'user'
+                });
+
+                logSessionStatus('USER CREATED', `by admin: ${username}`);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true, username, role: role || 'user' }));
+                break;
+            }
+
+            // ADMIN: Delete user
+            case '/api/users/delete': {
+                const body = await getBody();
+                const { username } = JSON.parse(body);
+
+                if (!username) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Username required' }));
+                    return;
+                }
+
+                if (!users.has(username)) {
+                    res.writeHead(404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'User not found' }));
+                    return;
+                }
+
+                // Prevent admin from deleting themselves
+                if (username === session.username) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Cannot delete your own account' }));
+                    return;
+                }
+
+                users.delete(username);
+
+                // Also kill all sessions for this user
+                for (const [token, s] of sessions) {
+                    if (s.username === username) {
+                        sessions.delete(token);
+                    }
+                }
+
+                logSessionStatus('USER DELETED', `by admin: ${username}`);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true, username }));
                 break;
             }
 
