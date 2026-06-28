@@ -4,4 +4,15 @@ services:
     env: node
     buildCommand: npm install
     startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DEFAULT_USER
+        value: lyco
+      - key: DEFAULT_PASS
+        value: lyco123
+      - key: ADMIN_USER
+        value: admin
+      - key: ADMIN_PASS
+        value: admin123
     plan: free
