@@ -78,18 +78,29 @@ function normalizeIP(ip) {
     return ip;
 }
 
-// Get session from cookie header with IP and User-Agent validation
-function getSession(cookieHeader, clientIP, userAgent) {
-    if (!cookieHeader) return null;
+// Get session from cookie or Authorization header
+function getSession(cookieHeader, authHeader, clientIP, userAgent) {
+    let sessionToken = null;
 
-    const cookies = Object.fromEntries(
-        cookieHeader.split(';').map(c => {
-            const [k, v] = c.trim().split('=');
-            return [k, v];
-        })
-    );
+    // Try cookie first
+    if (cookieHeader) {
+        const cookies = Object.fromEntries(
+            cookieHeader.split(';').map(c => {
+                const [k, v] = c.trim().split('=');
+                return [k, v];
+            })
+        );
+        sessionToken = cookies['session'];
+    }
 
-    const sessionToken = cookies['session'];
+    // Try Authorization header (Bearer token)
+    if (!sessionToken && authHeader) {
+        const match = authHeader.match(/^Bearer\s+(.+)$/i);
+        if (match) {
+            sessionToken = match[1];
+        }
+    }
+
     if (!sessionToken) return null;
 
     const session = sessions.get(sessionToken);
@@ -210,13 +221,13 @@ function makeApiRequest(service, cookieId) {
 
 // Create server
 const server = http.createServer(async (req, res) => {
-    // CORS headers
-    // CORS - allow the origin that made the request
+    // CORS headers - allow all origins for credentials
     const origin = req.headers.origin || '*';
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept, Cookie');
     res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Expose-Headers', 'Set-Cookie');
 
     if (req.method === 'OPTIONS') {
         res.writeHead(204);
@@ -310,7 +321,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Auth check for protected routes
-    const session = getSession(req.headers.cookie, clientIP, req.headers['user-agent']);
+    const session = getSession(req.headers.cookie, req.headers.authorization, clientIP, req.headers['user-agent']);
 
     if (route.auth && !session) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
